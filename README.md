@@ -12,6 +12,7 @@ VoidBound é uma ferramenta robusta de criptografia e descriptografia de arquivo
 - **Derivação Segura de Chave**: PBKDF2HMAC com SHA-256, salt aleatório e 100.000 iterações
 - **Processamento Eficiente**: Manipulação de arquivos em blocos para suportar arquivos grandes (até 10GB+)
 - **Modos de Operação**: Criptografar/descriptografar arquivos individuais ou diretórios completos (recursivamente)
+- **Arquivamento Integrado**: Empacote diretórios inteiros em um único arquivo criptografado
 - **Interface Dupla**: CLI para automação e GUI para uso simplificado
 - **Multiplataforma**: Suporte para Windows, macOS e Linux
 - **Preservação de Metadados**: Mantém permissões e datas de modificação dos arquivos originais
@@ -80,12 +81,38 @@ voidbound --decrypt --input arquivo.txt.encrypted
 # Criptografar um diretório inteiro
 voidbound --encrypt --input /caminho/pasta --output /destino
 
+# Criptografar um diretório como um único arquivo
+voidbound --encrypt --archive --input /caminho/pasta --output /destino
+
 # Criptografar com senha específica (não recomendado em produção)
 voidbound --encrypt --input arquivo.txt --password minhasenha
 
 # Modo detalhado (verbose)
 voidbound --encrypt --input arquivo.txt --verbose
 ```
+
+## Exemplos
+
+### Exemplo 1: Criptografar arquivos confidenciais
+
+```bash
+voidbound --encrypt --input documentos_confidenciais/ --output documentos_seguros/
+```
+
+### Exemplo 2: Descriptografar arquivos previamente criptografados
+
+```bash
+voidbound --decrypt --input backup.zip.encrypted
+```
+
+### Exemplo 3: Arquivar e criptografar uma estrutura de diretórios como um único arquivo
+
+```bash
+voidbound --encrypt --archive --input /dados/confidenciais --output /destino/seguro/
+```
+
+Isso criará um único arquivo `/destino/seguro/confidenciais.encrypted` contendo toda a estrutura de diretórios criptografada.
+
 
 ### Interface Gráfica (GUI)
 
