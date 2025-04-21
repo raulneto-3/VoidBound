@@ -1,0 +1,59 @@
+# Arquivos de byte-code Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Diretórios de build e instalação
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Arquivos de distribuição
+*.exe
+*.deb
+*.tar.gz
+*.zip
+VoidBound-Setup.exe
+VoidBound-macOS.tar.gz
+VoidBound-Linux.tar.gz
+
+# Arquivos gerados durante teste/uso
+*.encrypted
+*.decrypted
+tests/files/temp/
+
+# Arquivos de ambiente virtual
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# Arquivos de cache
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Diretórios e arquivos de IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+log/
+logs/
+
+# Arquivos temporários
+tmp/
+temp/
