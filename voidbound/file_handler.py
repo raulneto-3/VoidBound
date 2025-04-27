@@ -4,8 +4,10 @@ import tempfile
 import logging
 import base64
 import datetime
+import tarfile
 import time
 from typing import List, Dict, Any, Optional, Tuple, Generator
+from cryptography.hazmat.primitives import hashes
 
 from .crypto_utils import CryptoUtils
 from .file_format import FileFormat
