@@ -5,6 +5,7 @@ import getpass
 import logging
 import tempfile
 from typing import Dict, Any, Optional
+from .crypto_utils import CryptoUtils  # Import CryptoUtils from the appropriate module
 
 from .file_handler import FileHandler
 
@@ -19,8 +20,7 @@ class CLI:
     def _create_parser(self) -> argparse.ArgumentParser:
         """Cria e configura o parser de argumentos."""
         parser = argparse.ArgumentParser(
-            description='Serviço de criptografia/descriptografia de arquivos usando AES-256',
-            epilog='IMPORTANTE: Arquivos perdidos não podem ser recuperados sem a senha correta!'
+            description='VoidBound - Serviço de Criptografia/Descriptografia de Arquivos'
         )
         
         mode_group = parser.add_mutually_exclusive_group(required=True)
@@ -59,6 +59,35 @@ class CLI:
         sign_group.add_argument('--sign', help='Arquivo com chave privada para assinar')
         sign_group.add_argument('--verify', help='Arquivo com chave pública para verificar')
         sign_group.add_argument('--generate-keys', help='Gerar par de chaves e salvar com prefixo')
+        
+        # Novo grupo para recursos avançados
+        advanced_group = parser.add_argument_group('Recursos Avançados')
+        
+        # Opções para criptografia de camada dupla
+        dual_group = advanced_group.add_argument_group('Criptografia de Camada Dupla')
+        dual_group.add_argument('--dual-layer', action='store_true', 
+                              help='Ativar criptografia com proteção de camada dupla')
+        dual_group.add_argument('--password2', help='Segunda senha para camada dupla')
+        dual_group.add_argument('--layer1-algo', choices=['aes-cbc', 'aes-gcm', 'chacha20'],
+                              default='aes-gcm', help='Algoritmo para primeira camada')
+        dual_group.add_argument('--layer2-algo', choices=['aes-cbc', 'aes-gcm', 'chacha20'],
+                              default='chacha20', help='Algoritmo para segunda camada')
+        
+        # Opções para criptografia híbrida
+        hybrid_group = advanced_group.add_argument_group('Criptografia Híbrida')
+        hybrid_group.add_argument('--hybrid', action='store_true',
+                                help='Ativar criptografia híbrida (assimétrica+simétrica)')
+        hybrid_group.add_argument('--recipient-key', 
+                                help='Caminho para a chave pública do destinatário')
+        hybrid_group.add_argument('--private-key',
+                                help='Caminho para a chave privada (descriptografia)')
+        
+        # Opções para compartimentalização
+        comp_group = advanced_group.add_argument_group('Compartimentalização')
+        comp_group.add_argument('--compartmentalize', action='store_true',
+                              help='Ativar compartimentalização de arquivo')
+        comp_group.add_argument('--compartment-size', type=int, default=10*1024*1024,
+                              help='Tamanho de cada compartimento em bytes (padrão: 10MB)')
  
         return parser
     
@@ -183,6 +212,146 @@ class CLI:
             
             # Determinar modo
             encrypt = parsed_args['encrypt']
+            
+            # === ADIÇÃO DE CÓDIGO PARA RECURSOS AVANÇADOS ===
+            
+            # Verificar se está usando recursos avançados
+            if parsed_args.get('dual_layer'):
+                if parsed_args.get('encrypt'):
+                    # Verificar se a segunda senha foi fornecida
+                    if not parsed_args.get('password2'):
+                        if parsed_args.get('password'):
+                            # Pedir a segunda senha interativamente
+                            parsed_args['password2'] = self.get_password(
+                                "Digite a segunda senha (camada 2): ", confirm=True
+                            )
+                        else:
+                            # Pedir ambas as senhas interativamente
+                            parsed_args['password'] = self.get_password(
+                                "Digite a primeira senha (camada 1): ", confirm=True
+                            )
+                            parsed_args['password2'] = self.get_password(
+                                "Digite a segunda senha (camada 2): ", confirm=True
+                            )
+                    
+                    # Executar criptografia de camada dupla
+                    output_path = FileHandler.dual_layer_encrypt_file(
+                        parsed_args['input'],
+                        parsed_args['password'],
+                        parsed_args['password2'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False),
+                        parsed_args.get('layer1_algo', CryptoUtils.ALG_AES_GCM),
+                        parsed_args.get('layer2_algo', CryptoUtils.ALG_CHACHA20)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo criptografado com camada dupla: {output_path}")
+                    
+                    return 0
+                    
+                elif parsed_args.get('decrypt'):
+                    # Verificar se as senhas foram fornecidas
+                    if not parsed_args.get('password'):
+                        parsed_args['password'] = self.get_password("Digite a primeira senha (camada 1): ")
+                    if not parsed_args.get('password2'):
+                        parsed_args['password2'] = self.get_password("Digite a segunda senha (camada 2): ")
+                    
+                    # Executar descriptografia de camada dupla
+                    output_path = FileHandler.dual_layer_decrypt_file(
+                        parsed_args['input'],
+                        parsed_args['password'],
+                        parsed_args['password2'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo descriptografado com sucesso: {output_path}")
+                    
+                    return 0
+            
+            # Verificar se está usando criptografia híbrida
+            elif parsed_args.get('hybrid'):
+                if parsed_args.get('encrypt'):
+                    # Verificar se a chave pública do destinatário foi fornecida
+                    if not parsed_args.get('recipient_key'):
+                        raise ValueError("É necessário fornecer a chave pública do destinatário (--recipient-key)")
+                    
+                    # Executar criptografia híbrida
+                    output_path = FileHandler.hybrid_encrypt_file(
+                        parsed_args['input'],
+                        parsed_args['recipient_key'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False),
+                        parsed_args.get('algorithm', CryptoUtils.ALG_AES_GCM)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo criptografado com criptografia híbrida: {output_path}")
+                    
+                    return 0
+                    
+                elif parsed_args.get('decrypt'):
+                    # Verificar se a chave privada foi fornecida
+                    if not parsed_args.get('private_key'):
+                        raise ValueError("É necessário fornecer sua chave privada (--private-key)")
+                    
+                    # Executar descriptografia híbrida
+                    output_path = FileHandler.hybrid_decrypt_file(
+                        parsed_args['input'],
+                        parsed_args['private_key'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo descriptografado com sucesso: {output_path}")
+                    
+                    return 0
+            
+            # Verificar se está usando compartimentalização
+            elif parsed_args.get('compartmentalize'):
+                if parsed_args.get('encrypt'):
+                    # Verificar se a senha foi fornecida
+                    if not parsed_args.get('password'):
+                        parsed_args['password'] = self.get_password("Digite a senha: ", confirm=True)
+                    
+                    # Executar criptografia com compartimentalização
+                    output_path = FileHandler.compartmentalized_encrypt_file(
+                        parsed_args['input'],
+                        parsed_args['password'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False),
+                        parsed_args.get('algorithm', CryptoUtils.ALG_AES_GCM),
+                        parsed_args.get('kdf', CryptoUtils.KDF_PBKDF2),
+                        parsed_args.get('compartment_size', CryptoUtils.COMPARTMENT_SIZE)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo criptografado com compartimentalização: {output_path}")
+                    
+                    return 0
+                    
+                elif parsed_args.get('decrypt'):
+                    # Verificar se a senha foi fornecida
+                    if not parsed_args.get('password'):
+                        parsed_args['password'] = self.get_password("Digite a senha: ")
+                    
+                    # Executar descriptografia com compartimentalização
+                    output_path = FileHandler.compartmentalized_decrypt_file(
+                        parsed_args['input'],
+                        parsed_args['password'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False)
+                    )
+                    
+                    if parsed_args.get('verbose'):
+                        print(f"Arquivo descriptografado com sucesso: {output_path}")
+                    
+                    return 0
+            
+            # Se não estiver usando recursos avançados, continuar com o processamento normal
             
             # Processar arquivos
             if encrypt and parsed_args.get('archive') and os.path.isdir(parsed_args['input']):

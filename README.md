@@ -146,6 +146,43 @@ voidbound --decrypt --input dados.txt.encrypted --verify meu_par_de_chaves.publi
 ```
 
 
+### 1. Criptografia de Camada Dupla
+
+```bash
+# Criptografar usando duas senhas diferentes
+voidbound --encrypt --input arquivo.txt --dual-layer --password "senha1" --password2 "senha2"
+
+# Descriptografar arquivo de camada dupla
+voidbound --decrypt --input arquivo.txt.dual-encrypted --dual-layer
+```
+
+### 2. Compartimentalização (para arquivos grandes)
+
+```bash
+# Criptografar dividindo em compartimentos de 5MB
+voidbound --encrypt --input video.mp4 --compartmentalize --compartment-size 5242880
+
+# Descriptografar arquivo compartimentado
+voidbound --decrypt --input video.mp4.comp-encrypted --compartmentalize
+```
+
+### 3. Criptografia Híbrida (para compartilhamento seguro)
+
+```bash
+# Gerar par de chaves para Alice
+voidbound --generate-keys alice_keys
+
+# Gerar par de chaves para Bob
+voidbound --generate-keys bob_keys
+
+# Alice criptografa um arquivo para Bob
+voidbound --encrypt --input secreto.pdf --hybrid --recipient-key bob_keys.public
+
+# Bob descriptografa o arquivo usando sua chave privada
+voidbound --decrypt --input secreto.pdf.hybrid-encrypted --hybrid --private-key bob_keys.private
+```
+
+
 ### Interface Gráfica (GUI)
 
 Para iniciar a interface gráfica:

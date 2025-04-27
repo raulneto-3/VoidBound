@@ -1,7 +1,7 @@
 import struct
 import json
 import base64
-from typing import Dict, Any, Tuple, Optional, Union
+from typing import Dict, Any, Tuple, Optional, Union, List
 
 
 class FileFormat:
@@ -112,3 +112,64 @@ class FileFormat:
         
         # No formato antigo, os dados criptografados começam após salt+iv (32 bytes)
         return metadata, 32
+    
+    # Novos métodos para lidar com formatos avançados
+    @staticmethod
+    def pack_compartments(encrypted_compartments: List[bytes], metadata: Dict[str, Any]) -> bytes:
+        """
+        Empacota compartimentos criptografados em um único arquivo.
+        
+        Args:
+            encrypted_compartments: Lista de compartimentos criptografados
+            metadata: Metadados do arquivo
+            
+        Returns:
+            Dados empacotados prontos para serem escritos
+        """
+        # Inicializar header com metadados
+        header = FileFormat.pack_header(metadata)
+        
+        # Calcular tamanho de cada compartimento
+        sizes = [len(comp) for comp in encrypted_compartments]
+        sizes_data = struct.pack(f'<{len(sizes)}Q', *sizes)
+        
+        # Montar o arquivo final: header + tamanhos + compartimentos
+        result = bytearray(header)
+        result.extend(struct.pack('<I', len(sizes)))  # Número de compartimentos
+        result.extend(sizes_data)  # Tamanhos dos compartimentos
+        
+        # Adicionar cada compartimento
+        for comp in encrypted_compartments:
+            result.extend(comp)
+            
+        return bytes(result)
+    
+    @staticmethod
+    def unpack_compartments(data: bytes) -> Tuple[List[bytes], Dict[str, Any]]:
+        """
+        Desempacota um arquivo compartimentado.
+        
+        Args:
+            data: Dados empacotados do arquivo
+            
+        Returns:
+            Tupla (lista de compartimentos criptografados, metadados)
+        """
+        # Extrair metadados
+        metadata, pos = FileFormat.unpack_header(data)
+        
+        # Ler número de compartimentos
+        comp_count = struct.unpack('<I', data[pos:pos+4])[0]
+        pos += 4
+        
+        # Ler tamanhos dos compartimentos
+        sizes = struct.unpack(f'<{comp_count}Q', data[pos:pos+8*comp_count])
+        pos += 8 * comp_count
+        
+        # Extrair cada compartimento
+        compartments = []
+        for size in sizes:
+            compartments.append(data[pos:pos+size])
+            pos += size
+        
+        return compartments, metadata
