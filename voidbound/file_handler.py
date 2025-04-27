@@ -5,7 +5,7 @@ import logging
 import base64
 import datetime
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Generator
 
 from .crypto_utils import CryptoUtils
 from .file_format import FileFormat

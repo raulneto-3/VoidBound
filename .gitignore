@@ -27,7 +27,7 @@ tests/files/temp/
 
 # Arquivos de ambiente virtual
 venv/
-env/
+*env/
 ENV/
 .venv/
 .env/
