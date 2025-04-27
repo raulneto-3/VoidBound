@@ -3,6 +3,8 @@ import shutil
 import tempfile
 import logging
 import base64
+import datetime
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 from .crypto_utils import CryptoUtils
@@ -816,3 +818,322 @@ class FileHandler:
             if verbose:
                 logging.exception(f"Erro ao descriptografar arquivo com compartimentalização: {str(e)}")
             raise
+
+    # ======== MÉTODOS PARA AUTO-DESTRUIÇÃO PROGRAMADA ========
+    
+    @staticmethod
+    def encrypt_file_with_expiration(
+        input_path: str,
+        password: str,
+        expiration_date: datetime.datetime,
+        output_path: Optional[str] = None,
+        verbose: bool = False,
+        algorithm: str = CryptoUtils.DEFAULT_ALGORITHM,
+        kdf_type: str = CryptoUtils.DEFAULT_KDF,
+        kdf_params: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Criptografa um arquivo com data de expiração.
+        
+        Args:
+            input_path: Caminho do arquivo a ser criptografado
+            password: Senha para criptografia
+            expiration_date: Data de expiração como objeto datetime
+            output_path: Caminho para salvar o arquivo criptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            algorithm: Algoritmo de criptografia
+            kdf_type: Tipo de derivação de chave
+            kdf_params: Parâmetros adicionais para KDF
+            
+        Returns:
+            Caminho do arquivo criptografado
+        """
+        if verbose:
+            logging.info(f"Criptografando arquivo {input_path} com expiração em {expiration_date.isoformat()}")
+        
+        # Verificar se a data de expiração é no futuro
+        if expiration_date <= datetime.datetime.now():
+            raise ValueError("A data de expiração deve ser no futuro")
+        
+        # Definir caminho de saída se não fornecido
+        if output_path is None:
+            output_path = input_path + ".expires-" + expiration_date.strftime("%Y%m%d") + ".encrypted"
+        
+        # Criptografar arquivo normalmente
+        encrypted_path = FileHandler.encrypt_file(
+            input_path, password, output_path, verbose, algorithm, kdf_type, kdf_params
+        )
+        
+        # Ler o arquivo criptografado
+        with open(encrypted_path, 'rb') as f:
+            data = f.read()
+        
+        # Extrair metadados
+        metadata, data_offset = FileFormat.unpack_header(data)
+        encrypted_content = data[data_offset:]
+        
+        # Adicionar informações de expiração aos metadados
+        metadata = CryptoUtils.add_expiration(metadata, expiration_date)
+        
+        # Salvar arquivo com novos metadados
+        with open(encrypted_path, 'wb') as f:
+            header = FileFormat.pack_header(metadata)
+            f.write(header)
+            f.write(encrypted_content)
+        
+        if verbose:
+            logging.info(f"Arquivo criptografado salvo como {encrypted_path} com expiração definida")
+        
+        return encrypted_path
+    
+    @staticmethod
+    def check_file_expiration(
+        input_path: str,
+        verbose: bool = False,
+        enforce: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        Verifica se um arquivo criptografado expirou.
+        
+        Args:
+            input_path: Caminho do arquivo a ser verificado
+            verbose: Se True, exibe mensagens detalhadas
+            enforce: Se True, exclui o arquivo se tiver expirado
+            
+        Returns:
+            Tupla (expirado, mensagem)
+        """
+        if verbose:
+            logging.info(f"Verificando expiração do arquivo {input_path}")
+        
+        try:
+            # Ler os metadados do arquivo
+            with open(input_path, 'rb') as f:
+                header_data = f.read(8192)  # Ler o suficiente para o cabeçalho
+                metadata, _ = FileFormat.unpack_header(header_data)
+            
+            # Verificar se o arquivo expirou
+            expired, message = CryptoUtils.check_expiration(metadata)
+            
+            if expired and enforce:
+                # Excluir o arquivo com segurança
+                if verbose:
+                    logging.info(f"Arquivo {input_path} expirou. Excluindo...")
+                
+                deleted = CryptoUtils.secure_delete_file(input_path)
+                if deleted:
+                    return True, f"{message}. Arquivo excluído com segurança."
+                else:
+                    return True, f"{message}. Falha ao excluir o arquivo."
+            
+            return expired, message
+            
+        except Exception as e:
+            if verbose:
+                logging.exception(f"Erro ao verificar expiração: {str(e)}")
+            return False, f"Erro ao verificar expiração: {str(e)}"
+    
+    @staticmethod
+    def decrypt_with_expiration_check(
+        input_path: str,
+        password: str,
+        output_path: Optional[str] = None,
+        verbose: bool = False,
+        allow_expired: bool = False
+    ) -> str:
+        """
+        Descriptografa um arquivo com verificação de expiração.
+        
+        Args:
+            input_path: Caminho do arquivo criptografado
+            password: Senha para descriptografia
+            output_path: Caminho para salvar o arquivo descriptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            allow_expired: Se True, permite descriptografar arquivos expirados
+            
+        Returns:
+            Caminho do arquivo descriptografado
+        """
+        if verbose:
+            logging.info(f"Descriptografando arquivo {input_path} com verificação de expiração")
+        
+        # Verificar expiração
+        expired, message = FileHandler.check_file_expiration(input_path, verbose, False)
+        
+        if expired and not allow_expired:
+            raise ValueError(f"Arquivo expirado: {message}")
+        elif expired and allow_expired:
+            if verbose:
+                logging.warning(f"Arquivo expirado ({message}), mas permitindo acesso por solicitação")
+        elif verbose and message:
+            logging.info(message)
+        
+        # Prosseguir com a descriptografia normal
+        return FileHandler.decrypt_file(input_path, password, output_path, verbose)
+    
+    # ======== MÉTODOS PARA BACKUP DE EMERGÊNCIA ========
+    
+    @staticmethod
+    def encrypt_file_with_recovery(
+        input_path: str,
+        password: str,
+        output_path: Optional[str] = None,
+        verbose: bool = False,
+        algorithm: str = CryptoUtils.DEFAULT_ALGORITHM,
+        num_shares: int = CryptoUtils.RECOVERY_SHARES,
+        threshold: int = CryptoUtils.RECOVERY_THRESHOLD,
+        save_shares: bool = True,
+        shares_dir: Optional[str] = None
+    ) -> Tuple[str, List[str]]:
+        """
+        Criptografa um arquivo com mecanismo de recuperação de emergência.
+        
+        Args:
+            input_path: Caminho do arquivo a ser criptografado
+            password: Senha principal
+            output_path: Caminho para salvar o arquivo criptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            algorithm: Algoritmo de criptografia
+            num_shares: Número de partes da chave de recuperação
+            threshold: Número mínimo de partes para recuperação
+            save_shares: Se True, salva as partes em arquivos
+            shares_dir: Diretório onde salvar as partes
+            
+        Returns:
+            Tupla (caminho do arquivo criptografado, lista de caminhos das partes)
+        """
+        if verbose:
+            logging.info(f"Criptografando arquivo {input_path} com recuperação de emergência")
+        
+        # Definir caminho de saída se não fornecido
+        if output_path is None:
+            output_path = input_path + ".recoverable.encrypted"
+        
+        # Gerar chave de recuperação
+        recovery_key = CryptoUtils.generate_recovery_key()
+        
+        # Dividir a chave de recuperação em partes
+        recovery_shares = CryptoUtils.generate_recovery_shares(recovery_key, num_shares, threshold)
+        
+        # Ler o arquivo de entrada
+        with open(input_path, 'rb') as f:
+            data = f.read()
+        
+        # Criptografar com senha e chave de recuperação
+        encrypted_data, metadata = CryptoUtils.encrypt_with_recovery(data, password, recovery_key, algorithm)
+        
+        # Adicionar informações de recuperação aos metadados
+        metadata["recovery"].update({
+            "shares": num_shares,
+            "threshold": threshold,
+            "creation_date": datetime.datetime.now().isoformat()
+        })
+        
+        # Salvar arquivo criptografado
+        with open(output_path, 'wb') as f:
+            header = FileFormat.pack_header(metadata)
+            f.write(header)
+            f.write(encrypted_data)
+        
+        # Salvar partes da chave de recuperação se solicitado
+        share_paths = []
+        if save_shares:
+            # Determinar diretório para salvar as partes
+            if not shares_dir:
+                shares_dir = os.path.dirname(output_path)
+                if not shares_dir:
+                    shares_dir = "."
+            
+            os.makedirs(shares_dir, exist_ok=True)
+            
+            # Nome base do arquivo
+            base_name = os.path.basename(input_path)
+            
+            # Salvar cada parte como um arquivo separado
+            for i, share in enumerate(recovery_shares):
+                share_path = os.path.join(shares_dir, f"{base_name}.recovery-{i+1}-of-{num_shares}.key")
+                with open(share_path, 'wb') as f:
+                    f.write(share)
+                share_paths.append(share_path)
+                
+                if verbose:
+                    logging.info(f"Parte de recuperação {i+1} salva como {share_path}")
+        
+        if verbose:
+            logging.info(f"Arquivo criptografado com recuperação salvo como {output_path}")
+            logging.info(f"IMPORTANTE: São necessárias pelo menos {threshold} de {num_shares} partes para recuperação")
+        
+        return output_path, share_paths
+    
+    @staticmethod
+    def decrypt_with_recovery_keys(
+        input_path: str,
+        recovery_shares: List[str],
+        output_path: Optional[str] = None,
+        verbose: bool = False
+    ) -> str:
+        """
+        Descriptografa um arquivo usando chaves de recuperação de emergência.
+        
+        Args:
+            input_path: Caminho do arquivo criptografado
+            recovery_shares: Lista de caminhos das partes da chave de recuperação
+            output_path: Caminho para salvar o arquivo descriptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            
+        Returns:
+            Caminho do arquivo descriptografado
+        """
+        if verbose:
+            logging.info(f"Descriptografando arquivo {input_path} usando recuperação de emergência")
+        
+        # Definir caminho de saída se não fornecido
+        if output_path is None:
+            if input_path.endswith(".recoverable.encrypted"):
+                output_path = input_path[:-22]
+            else:
+                output_path = input_path + ".recovered"
+        
+        try:
+            # Ler arquivo criptografado
+            with open(input_path, 'rb') as f:
+                data = f.read()
+            
+            # Extrair metadados
+            metadata, data_offset = FileFormat.unpack_header(data)
+            encrypted_content = data[data_offset:]
+            
+            # Verificar se o arquivo tem recuperação de emergência habilitada
+            if not metadata.get("recovery", {}).get("enabled", False):
+                raise ValueError("Este arquivo não tem recuperação de emergência habilitada")
+            
+            # Verificar número mínimo de partes
+            threshold = metadata["recovery"].get("threshold", CryptoUtils.RECOVERY_THRESHOLD)
+            if len(recovery_shares) < threshold:
+                raise ValueError(f"São necessárias pelo menos {threshold} partes para recuperação")
+            
+            # Ler as partes da chave de recuperação
+            shares_data = []
+            for share_path in recovery_shares:
+                with open(share_path, 'rb') as f:
+                    shares_data.append(f.read())
+            
+            # Reconstruir a chave de recuperação
+            recovery_key = CryptoUtils.reconstruct_secret(shares_data)
+            
+            # Descriptografar usando a chave de recuperação
+            decrypted_data = CryptoUtils.decrypt_with_recovery(encrypted_content, recovery_key, metadata)
+            
+            # Salvar arquivo descriptografado
+            with open(output_path, 'wb') as f:
+                f.write(decrypted_data)
+            
+            if verbose:
+                logging.info(f"Arquivo recuperado com sucesso e salvo como {output_path}")
+            
+            return output_path
+            
+        except Exception as e:
+            if verbose:
+                logging.exception(f"Erro na recuperação de emergência: {str(e)}")
+            raise ValueError(f"Falha na recuperação de emergência: {str(e)}")

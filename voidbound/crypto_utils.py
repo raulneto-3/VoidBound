@@ -3,6 +3,8 @@ import secrets
 import json
 import base64
 import struct
+import time
+import datetime
 from typing import Tuple, Optional, Dict, Any, Union, List
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -13,6 +15,13 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.fernet import Fernet
+
+# Importação para compartilhamento de segredo
+import secrets
+import hashlib
+from Crypto.Protocol.SecretSharing import Shamir
 
 # Adicione essa importação se estiver disponível no seu ambiente
 # Se não estiver, você precisará instalar o pacote 'argon2-cffi'
@@ -57,6 +66,10 @@ class CryptoUtils:
     RSA_KEY_SIZE = 2048
     CURVE_TYPE = ec.SECP384R1()  # Curva elíptica para ECDH
     COMPARTMENT_SIZE = 10 * 1024 * 1024  # 10MB por compartimento
+    
+    # Parâmetros para compartilhamento de segredo
+    RECOVERY_SHARES = 5  # Número total de partes
+    RECOVERY_THRESHOLD = 3  # Número mínimo para recuperação
     
     @staticmethod
     def generate_salt() -> bytes:
@@ -714,3 +727,297 @@ class CryptoUtils:
         digest = hashes.Hash(hashes.SHA256())
         digest.update(data)
         return digest.finalize()
+    
+    # ======== NOVOS MÉTODOS PARA AUTO-DESTRUIÇÃO PROGRAMADA ========
+    
+    @staticmethod
+    def add_expiration(metadata: Dict[str, Any], expiration_date: datetime.datetime) -> Dict[str, Any]:
+        """
+        Adiciona informações de expiração aos metadados.
+        
+        Args:
+            metadata: Metadados existentes
+            expiration_date: Data de expiração como objeto datetime
+            
+        Returns:
+            Metadados atualizados com informações de expiração
+        """
+        # Converter datetime para timestamp Unix (segundos desde 1970-01-01)
+        expiration_timestamp = int(expiration_date.timestamp())
+        
+        # Adicionar aos metadados
+        metadata["expiration"] = {
+            "enabled": True,
+            "timestamp": expiration_timestamp,
+            "date_str": expiration_date.isoformat()
+        }
+        
+        return metadata
+    
+    @staticmethod
+    def check_expiration(metadata: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """
+        Verifica se um arquivo expirou com base em seus metadados.
+        
+        Args:
+            metadata: Metadados do arquivo
+            
+        Returns:
+            Tupla (expirado, mensagem)
+                - expirado: True se o arquivo expirou, False caso contrário
+                - mensagem: Mensagem indicando status de expiração ou None
+        """
+        if not metadata.get("expiration", {}).get("enabled", False):
+            return False, None
+        
+        try:
+            # Obter timestamp de expiração
+            expiry_timestamp = metadata["expiration"]["timestamp"]
+            current_timestamp = int(time.time())
+            
+            if current_timestamp > expiry_timestamp:
+                expiry_date_str = metadata["expiration"]["date_str"]
+                return True, f"Arquivo expirado em {expiry_date_str}"
+                
+            # Calcular tempo restante
+            time_left = expiry_timestamp - current_timestamp
+            days_left = time_left // (24 * 3600)
+            hours_left = (time_left % (24 * 3600)) // 3600
+            
+            if days_left > 0:
+                return False, f"Arquivo expira em {days_left} dias e {hours_left} horas"
+            else:
+                return False, f"Arquivo expira em {hours_left} horas"
+            
+        except (KeyError, ValueError):
+            return False, "Informações de expiração inválidas ou ausentes"
+    
+    @staticmethod
+    def secure_delete_file(file_path: str, passes: int = 3) -> bool:
+        """
+        Exclui um arquivo de forma segura, sobrescrevendo seu conteúdo várias vezes.
+        
+        Args:
+            file_path: Caminho do arquivo a ser excluído
+            passes: Número de passagens de sobrescrita
+            
+        Returns:
+            True se o arquivo foi excluído com sucesso, False caso contrário
+        """
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            return False
+            
+        try:
+            # Obter o tamanho do arquivo
+            file_size = os.path.getsize(file_path)
+            
+            # Sobrescrever o arquivo várias vezes
+            with open(file_path, "r+b") as f:
+                for _ in range(passes):
+                    # Posicionar no início
+                    f.seek(0)
+                    
+                    # Sobrescrever com bytes aleatórios
+                    f.write(os.urandom(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+                    
+                    # Sobrescrever com zeros
+                    f.seek(0)
+                    f.write(b'\x00' * file_size)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    
+                    # Sobrescrever com uns (0xFF bytes)
+                    f.seek(0)
+                    f.write(b'\xFF' * file_size)
+                    f.flush()
+                    os.fsync(f.fileno())
+            
+            # Finalmente remover o arquivo
+            os.remove(file_path)
+            return True
+            
+        except Exception:
+            return False
+            
+    # ======== NOVOS MÉTODOS PARA BACKUP DE EMERGÊNCIA ========
+    
+    @staticmethod
+    def generate_recovery_key() -> bytes:
+        """
+        Gera uma chave de recuperação aleatória.
+        
+        Returns:
+            Chave de recuperação como bytes
+        """
+        return secrets.token_bytes(32)  # 256 bits
+    
+    @staticmethod
+    def generate_recovery_shares(secret: bytes, 
+                               shares: int = RECOVERY_SHARES, 
+                               threshold: int = RECOVERY_THRESHOLD) -> List[bytes]:
+        """
+        Divide uma chave de recuperação em múltiplas partes usando esquema de Shamir.
+        
+        Args:
+            secret: Chave secreta a ser compartilhada
+            shares: Número total de partes a serem geradas
+            threshold: Número mínimo de partes necessárias para reconstrução
+            
+        Returns:
+            Lista de partes da chave
+        """
+        # Converter a chave para um valor inteiro
+        secret_int = int.from_bytes(secret, byteorder='big')
+        
+        # Gerar compartilhamentos
+        shares_values = Shamir.split(threshold, shares, secret_int)
+        
+        # Converter compartilhamentos para bytes
+        shares_bytes = []
+        for idx, value in shares_values:
+            # Combinar o índice e o valor em uma única estrutura de bytes
+            idx_bytes = idx.to_bytes(2, byteorder='big')
+            value_bytes = value.to_bytes(32, byteorder='big')
+            shares_bytes.append(idx_bytes + value_bytes)
+        
+        return shares_bytes
+    
+    @staticmethod
+    def reconstruct_secret(shares: List[bytes]) -> bytes:
+        """
+        Reconstrói a chave secreta a partir das partes compartilhadas.
+        
+        Args:
+            shares: Lista de partes da chave
+            
+        Returns:
+            Chave secreta reconstruída
+        """
+        # Extrair índices e valores das partes
+        shares_values = []
+        for share in shares:
+            idx = int.from_bytes(share[:2], byteorder='big')
+            value = int.from_bytes(share[2:], byteorder='big')
+            shares_values.append((idx, value))
+        
+        # Reconstruir o segredo
+        secret_int = Shamir.combine(shares_values)
+        
+        # Converter de volta para bytes
+        return secret_int.to_bytes(32, byteorder='big')
+    
+    @staticmethod
+    def encrypt_with_recovery(data: bytes, 
+                            password: str, 
+                            recovery_key: bytes,
+                            algorithm: str = ALG_AES_GCM) -> Tuple[bytes, Dict[str, Any]]:
+        """
+        Criptografa dados com senha principal e chave de recuperação.
+        
+        Args:
+            data: Dados a serem criptografados
+            password: Senha principal
+            recovery_key: Chave de recuperação
+            algorithm: Algoritmo de criptografia
+            
+        Returns:
+            Tupla (dados criptografados, metadados)
+        """
+        # Gerar salt e IV
+        salt = CryptoUtils.generate_salt()
+        iv_or_nonce = CryptoUtils.generate_nonce() if algorithm != CryptoUtils.ALG_AES_CBC else CryptoUtils.generate_iv()
+        
+        # Derivar chave principal da senha
+        main_key = CryptoUtils.derive_key(password, salt)
+        
+        # Criptografar dados com a chave principal
+        encrypted_data = CryptoUtils.encrypt_data(data, main_key, iv_or_nonce, algorithm)
+        
+        # Gerar uma chave Fernet baseada na chave de recuperação para dupla proteção
+        recovery_kdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b'recovery-key'
+        )
+        derived_recovery_key = recovery_kdf.derive(recovery_key)
+        recovery_fernet_key = base64.urlsafe_b64encode(derived_recovery_key)
+        
+        # Criar objeto Fernet para criptografia da chave principal
+        fernet = Fernet(recovery_fernet_key)
+        
+        # Criptografar a chave principal com a chave de recuperação
+        encrypted_main_key = fernet.encrypt(main_key)
+        
+        # Limpar chaves da memória
+        main_key_buffer = bytearray(main_key)
+        CryptoUtils.secure_overwrite(main_key_buffer)
+        
+        # Preparar metadados
+        metadata = {
+            "algorithm": algorithm,
+            "salt": base64.b64encode(salt).decode('ascii'),
+            "iv_or_nonce": base64.b64encode(iv_or_nonce).decode('ascii'),
+            "recovery": {
+                "enabled": True,
+                "encrypted_key": base64.b64encode(encrypted_main_key).decode('ascii')
+            }
+        }
+        
+        return encrypted_data, metadata
+    
+    @staticmethod
+    def decrypt_with_recovery(encrypted_data: bytes, 
+                            recovery_key: bytes, 
+                            metadata: Dict[str, Any]) -> bytes:
+        """
+        Descriptografa dados usando chave de recuperação.
+        
+        Args:
+            encrypted_data: Dados criptografados
+            recovery_key: Chave de recuperação
+            metadata: Metadados do arquivo
+            
+        Returns:
+            Dados descriptografados
+        """
+        # Verificar se recuperação está habilitada
+        if not metadata.get("recovery", {}).get("enabled", False):
+            raise ValueError("Recuperação de emergência não está habilitada para este arquivo")
+        
+        # Extrair dados necessários dos metadados
+        algorithm = metadata.get("algorithm", CryptoUtils.ALG_AES_GCM)
+        salt = base64.b64decode(metadata["salt"])
+        iv_or_nonce = base64.b64decode(metadata["iv_or_nonce"])
+        encrypted_main_key = base64.b64decode(metadata["recovery"]["encrypted_key"])
+        
+        # Derivar chave Fernet da chave de recuperação
+        recovery_kdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b'recovery-key'
+        )
+        derived_recovery_key = recovery_kdf.derive(recovery_key)
+        recovery_fernet_key = base64.urlsafe_b64encode(derived_recovery_key)
+        
+        # Criar objeto Fernet para descriptografia
+        fernet = Fernet(recovery_fernet_key)
+        
+        try:
+            # Descriptografar a chave principal usando a chave de recuperação
+            main_key = fernet.decrypt(encrypted_main_key)
+            
+            # Descriptografar os dados usando a chave principal
+            decrypted_data = CryptoUtils.decrypt_data(encrypted_data, main_key, iv_or_nonce, algorithm)
+            
+            # Limpar chave da memória
+            main_key_buffer = bytearray(main_key)
+            CryptoUtils.secure_overwrite(main_key_buffer)
+            
+            return decrypted_data
+            
+        except Exception as e:
+            raise ValueError(f"Falha na recuperação de emergência: {str(e)}")

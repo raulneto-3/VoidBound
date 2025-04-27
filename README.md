@@ -207,6 +207,46 @@ voidbound --encrypt --input documentos_confidenciais/ --output documentos_seguro
 voidbound --decrypt --input backup.zip.encrypted
 ```
 
+
+
+### Auto-destruição Programada
+
+```bash
+# Criptografar um arquivo que expira em 30 dias
+voidbound --encrypt --input documento.pdf --expires +30
+
+# Criptografar um arquivo com data específica de expiração
+voidbound --encrypt --input documento.pdf --expires 2025-12-31
+
+# Verificar se um arquivo expirou
+voidbound --check-expiry --input documento.pdf.expires-20251231.encrypted
+
+# Verificar e excluir arquivos expirados
+voidbound --check-expiry --enforce-expiry --input documento.pdf.expires-20251231.encrypted
+
+# Descriptografar, permitindo acesso mesmo se expirado
+voidbound --decrypt --input documento.pdf.expires-20251231.encrypted --allow-expired
+```
+
+### Backups de Emergência
+
+```bash
+# Criptografar com recuperação de emergência (5 partes, precisa de 3)
+voidbound --encrypt --input dados_importantes.zip --with-recovery
+
+# Especificar número de partes e limiar
+voidbound --encrypt --input dados_importantes.zip --with-recovery --recovery-shares 7 --recovery-threshold 4
+
+# Armazenar partes em diretório específico
+voidbound --encrypt --input dados_importantes.zip --with-recovery --recovery-dir /backup/keys
+
+# Recuperar arquivo usando partes de recuperação (sem senha)
+voidbound --decrypt --input dados_importantes.zip.recoverable.encrypted \
+  --recover-using \
+  backup1.key backup2.key backup3.key
+```
+
+
 ## Estrutura do Arquivo Criptografado
 
 Os arquivos criptografados seguem a estrutura:

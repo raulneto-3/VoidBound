@@ -6,6 +6,8 @@ import logging
 import tempfile
 from typing import Dict, Any, Optional
 from .crypto_utils import CryptoUtils  # Import CryptoUtils from the appropriate module
+import datetime
+from typing import List, Tuple
 
 from .file_handler import FileHandler
 
@@ -88,6 +90,29 @@ class CLI:
                               help='Ativar compartimentalização de arquivo')
         comp_group.add_argument('--compartment-size', type=int, default=10*1024*1024,
                               help='Tamanho de cada compartimento em bytes (padrão: 10MB)')
+        
+        # Grupo para auto-destruição programada
+        expiry_group = parser.add_argument_group('Auto-destruição Programada')
+        expiry_group.add_argument('--expires', help='Data de expiração no formato YYYY-MM-DD ou +dias')
+        expiry_group.add_argument('--check-expiry', action='store_true', 
+                                help='Apenas verificar se um arquivo expirou')
+        expiry_group.add_argument('--enforce-expiry', action='store_true', 
+                                help='Excluir automaticamente arquivos expirados')
+        expiry_group.add_argument('--allow-expired', action='store_true', 
+                                help='Permitir descriptografia de arquivos expirados')
+        
+        # Grupo para recuperação de emergência
+        recovery_group = parser.add_argument_group('Backup de Emergência')
+        recovery_group.add_argument('--with-recovery', action='store_true', 
+                                  help='Habilitar recuperação de emergência')
+        recovery_group.add_argument('--recovery-shares', type=int, default=5, 
+                                  help='Número total de partes da chave de recuperação')
+        recovery_group.add_argument('--recovery-threshold', type=int, default=3, 
+                                  help='Número mínimo de partes para recuperação')
+        recovery_group.add_argument('--recovery-dir', 
+                                  help='Diretório para salvar as partes da chave de recuperação')
+        recovery_group.add_argument('--recover-using', nargs='+', 
+                                  help='Caminhos para as partes da chave de recuperação')
  
         return parser
     
@@ -116,8 +141,21 @@ class CLI:
             result['kdf_params']['parallelism'] = parsed_args.parallelism
         
         # Se não especificado, o modo padrão é criptografia
-        if not result['encrypt'] and not result['decrypt']:
+        if not result['encrypt'] and not result['decrypt'] and not result['check_expiry']:
             result['encrypt'] = True
+        
+        # Processar a opção de expiração
+        if result['expires']:
+            try:
+                if result['expires'].startswith('+'):
+                    # Formato +dias
+                    days = int(result['expires'][1:])
+                    result['expiration_date'] = datetime.datetime.now() + datetime.timedelta(days=days)
+                else:
+                    # Formato YYYY-MM-DD
+                    result['expiration_date'] = datetime.datetime.strptime(result['expires'], "%Y-%m-%d")
+            except ValueError:
+                parser.error("Formato de data de expiração inválido. Use YYYY-MM-DD ou +dias.")
         
         return result
     
@@ -417,8 +455,144 @@ class CLI:
                 operation = "criptografados" if encrypt else "descriptografados"
                 logging.info(f"{len(processed_files)} arquivos {operation} com sucesso.")
             
-            return 0
-        
+            # AUTO-DESTRUIÇÃO PROGRAMADA
+            if parsed_args.get('check_expiry'):
+                if not os.path.exists(parsed_args['input']):
+                    print(f"Erro: O arquivo {parsed_args['input']} não existe.")
+                    return 1
+                    
+                expired, message = FileHandler.check_file_expiration(
+                    parsed_args['input'], 
+                    parsed_args.get('verbose', False),
+                    parsed_args.get('enforce_expiry', False)
+                )
+                
+                if expired:
+                    print(f"AVISO: {message}")
+                    return 1  # Retornar código de erro se o arquivo expirou
+                else:
+                    print(f"Informação: {message}")
+                    return 0
+            
+            # RECUPERAÇÃO DE EMERGÊNCIA
+            if parsed_args.get('recover_using'):
+                if not parsed_args.get('decrypt'):
+                    print("A opção --recover-using deve ser usada com --decrypt")
+                    return 1
+                    
+                try:
+                    # Verificar se todos os arquivos de recuperação existem
+                    for share_file in parsed_args['recover_using']:
+                        if not os.path.exists(share_file):
+                            print(f"Erro: Arquivo de recuperação não encontrado: {share_file}")
+                            return 1
+                    
+                    output_path = FileHandler.decrypt_with_recovery_keys(
+                        parsed_args['input'],
+                        parsed_args['recover_using'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False)
+                    )
+                    
+                    print(f"Arquivo recuperado com sucesso: {output_path}")
+                    return 0
+                    
+                except Exception as e:
+                    print(f"Erro na recuperação de emergência: {str(e)}")
+                    return 1
+            
+            # Obter senha para operações normais
+            if not parsed_args.get('recover_using'):
+                password = self.get_password(parsed_args['password'])
+            
+            # CRIPTOGRAFIA COM EXPIRAÇÃO
+            if parsed_args.get('encrypt') and parsed_args.get('expiration_date'):
+                try:
+                    output_path = FileHandler.encrypt_file_with_expiration(
+                        parsed_args['input'],
+                        password,
+                        parsed_args['expiration_date'],
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False),
+                        parsed_args.get('algorithm', CryptoUtils.DEFAULT_ALGORITHM),
+                        parsed_args.get('kdf', CryptoUtils.DEFAULT_KDF)
+                    )
+                    
+                    print(f"Arquivo criptografado com expiração: {output_path}")
+                    print(f"Data de expiração: {parsed_args['expiration_date'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    return 0
+                    
+                except Exception as e:
+                    print(f"Erro ao criptografar com expiração: {str(e)}")
+                    return 1
+            
+            # CRIPTOGRAFIA COM RECUPERAÇÃO
+            elif parsed_args.get('encrypt') and parsed_args.get('with_recovery'):
+                try:
+                    output_path, share_paths = FileHandler.encrypt_file_with_recovery(
+                        parsed_args['input'],
+                        password,
+                        parsed_args.get('output'),
+                        parsed_args.get('verbose', False),
+                        parsed_args.get('algorithm', CryptoUtils.DEFAULT_ALGORITHM),
+                        parsed_args.get('recovery_shares', CryptoUtils.RECOVERY_SHARES),
+                        parsed_args.get('recovery_threshold', CryptoUtils.RECOVERY_THRESHOLD),
+                        True,  # Sempre salvar as partes
+                        parsed_args.get('recovery_dir')
+                    )
+                    
+                    print(f"Arquivo criptografado com recuperação de emergência: {output_path}")
+                    print(f"Partes da chave de recuperação (guarde-as em locais separados):")
+                    for i, path in enumerate(share_paths):
+                        print(f"  {i+1}. {path}")
+                    print(f"\nIMPORTANTE: São necessárias pelo menos {parsed_args.get('recovery_threshold')} " +
+                          f"partes para recuperar o arquivo em caso de perda de senha.")
+                    return 0
+                    
+                except Exception as e:
+                    print(f"Erro ao criptografar com recuperação: {str(e)}")
+                    return 1
+            
+            # DESCRIPTOGRAFIA COM VERIFICAÇÃO DE EXPIRAÇÃO
+            elif parsed_args.get('decrypt'):
+                try:
+                    # Verificar se o arquivo existe
+                    if not os.path.exists(parsed_args['input']):
+                        print(f"Erro: O arquivo {parsed_args['input']} não existe.")
+                        return 1
+                    
+                    # Verificar se o arquivo tem metadados de expiração
+                    with open(parsed_args['input'], 'rb') as f:
+                        header_data = f.read(8192)
+                    metadata, _ = FileFormat.unpack_header(header_data)
+                    
+                    if metadata.get("expiration", {}).get("enabled", False):
+                        # Descriptografar com verificação de expiração
+                        output_path = FileHandler.decrypt_with_expiration_check(
+                            parsed_args['input'],
+                            password,
+                            parsed_args.get('output'),
+                            parsed_args.get('verbose', False),
+                            parsed_args.get('allow_expired', False)
+                        )
+                    else:
+                        # Descriptografia normal
+                        output_path = FileHandler.decrypt_file(
+                            parsed_args['input'],
+                            password,
+                            parsed_args.get('output'),
+                            parsed_args.get('verbose', False)
+                        )
+                    
+                    print(f"Arquivo descriptografado: {output_path}")
+                    return 0
+                    
+                except ValueError as e:
+                    print(f"Erro: {str(e)}")
+                    return 1
+            
+            # Processamento existente para outros casos...
+            
         except Exception as e:
             logging.error(f"Erro: {str(e)}")
             if parsed_args and parsed_args.get('verbose'):
