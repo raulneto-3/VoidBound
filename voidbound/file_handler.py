@@ -1,17 +1,18 @@
 import os
 import shutil
-from typing import Tuple, List, Optional, Generator
-from pathlib import Path
-import tarfile
 import tempfile
+import logging
+import base64
+from typing import List, Dict, Any, Optional, Tuple
+
 from .crypto_utils import CryptoUtils
+from .file_format import FileFormat
 
 
 class FileHandler:
-    """Classe para lidar com operações de arquivo."""
+    """Manipulador de arquivos para operações de criptografia."""
     
-    ENCRYPTED_EXTENSION = ".encrypted"
-    CHUNK_SIZE = 64 * 1024  # 64 KB
+    CHUNK_SIZE = 1024 * 1024  # 1MB
     
     @staticmethod
     def is_encrypted_file(filepath: str) -> bool:
@@ -65,116 +66,255 @@ class FileHandler:
                 yield chunk
     
     @staticmethod
-    def encrypt_file(input_path: str, password: str, output_path: Optional[str] = None,
-                    verbose: bool = False) -> str:
+    def encrypt_file(
+        input_path: str, 
+        password: str, 
+        output_path: Optional[str] = None,
+        verbose: bool = False,
+        algorithm: str = CryptoUtils.DEFAULT_ALGORITHM,
+        kdf_type: str = CryptoUtils.DEFAULT_KDF,
+        kdf_params: Optional[Dict[str, Any]] = None,
+        sign_with_key: Optional[bytes] = None,
+        associated_data: Optional[bytes] = None
+    ) -> str:
         """
-        Criptografa um arquivo usando AES-256-CBC.
+        Criptografa um arquivo.
         
         Args:
-            input_path: Caminho do arquivo a ser criptografado.
-            password: Senha para criptografia.
-            output_path: Caminho de saída opcional para o arquivo criptografado.
-            verbose: Se True, exibe informações detalhadas.
+            input_path: Caminho do arquivo a ser criptografado
+            password: Senha para criptografia
+            output_path: Caminho para salvar o arquivo criptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            algorithm: Algoritmo de criptografia
+            kdf_type: Tipo de derivação de chave
+            kdf_params: Parâmetros adicionais para o KDF
+            sign_with_key: Chave privada para assinar o arquivo (opcional)
+            associated_data: Dados associados para AEAD (opcional)
             
         Returns:
-            Caminho do arquivo criptografado.
+            Caminho do arquivo criptografado
         """
-        if not output_path:
-            output_path = FileHandler.get_output_path(input_path, True)
+        if verbose:
+            logging.info(f"Criptografando arquivo {input_path}")
         
-        # Gerar salt e IV
+        # Gerar salt e iv/nonce
         salt = CryptoUtils.generate_salt()
-        iv = CryptoUtils.generate_iv()
-        key = CryptoUtils.derive_key(password, salt)
+        iv_or_nonce = None
+        
+        # Gerar IV ou Nonce adequado para o algoritmo
+        if algorithm == CryptoUtils.ALG_AES_CBC:
+            iv_or_nonce = CryptoUtils.generate_iv()
+        else:
+            iv_or_nonce = CryptoUtils.generate_nonce()
+            
+        # Derivar chave
+        key = CryptoUtils.derive_key(password, salt, kdf_type, kdf_params)
+        
+        # Definir caminho de saída se não fornecido
+        if output_path is None:
+            output_path = input_path + ".encrypted"
+        
+        # Preparar metadados
+        metadata = {
+            "algorithm": algorithm,
+            "kdf": kdf_type,
+            "salt": base64.b64encode(salt).decode('ascii'),
+            "iv_or_nonce": base64.b64encode(iv_or_nonce).decode('ascii')
+        }
+        
+        # Adicionar parâmetros do KDF se fornecidos
+        if kdf_params:
+            metadata["kdf_params"] = kdf_params
+            
+        # Adicionar dados associados se fornecidos (para verificação)
+        if associated_data:
+            metadata["ad_hash"] = base64.b64encode(
+                CryptoUtils.hash_data(associated_data)
+            ).decode('ascii')
         
         try:
-            with open(output_path, 'wb') as out_file:
-                # Escrever salt e IV no início do arquivo
-                out_file.write(salt)
-                out_file.write(iv)
+            with open(input_path, 'rb') as infile, open(output_path, 'wb') as outfile:
+                # Escrever o cabeçalho com metadados
+                header = FileFormat.pack_header(metadata)
+                outfile.write(header)
+                
+                # Se for assinar, preparar buffer para todo o conteúdo criptografado
+                if sign_with_key:
+                    encrypted_buffer = bytearray()
                 
                 # Processar o arquivo em chunks
-                for chunk in FileHandler.read_file_chunks(input_path):
-                    encrypted_chunk = CryptoUtils.encrypt_data(chunk, key, iv)
-                    out_file.write(encrypted_chunk)
-            
-            # Preservar metadados (opcional)
-            shutil.copystat(input_path, output_path)
+                while True:
+                    chunk = infile.read(FileHandler.CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    
+                    # Criptografar o chunk
+                    encrypted_chunk = CryptoUtils.encrypt_data(
+                        chunk, key, iv_or_nonce, algorithm, associated_data
+                    )
+                    
+                    if sign_with_key:
+                        encrypted_buffer.extend(encrypted_chunk)
+                    else:
+                        outfile.write(encrypted_chunk)
+                
+                # Se estiver assinando, assinar todos os dados criptografados e adicionar a assinatura
+                if sign_with_key:
+                    signature = CryptoUtils.sign_data(bytes(encrypted_buffer), sign_with_key)
+                    
+                    # Adicionar a assinatura ao final do arquivo
+                    sig_metadata = {
+                        "signature_size": len(signature),
+                        "signature": base64.b64encode(signature).decode('ascii')
+                    }
+                    
+                    # Escrever o conteúdo criptografado e a assinatura
+                    outfile.write(encrypted_buffer)
+                    outfile.write(FileFormat.pack_header(sig_metadata))
             
             if verbose:
-                print(f"Arquivo criptografado salvo em: {output_path}")
+                logging.info(f"Arquivo criptografado salvo como {output_path}")
+            
+            # Limpar a chave da memória
+            key_buffer = bytearray(key)
+            CryptoUtils.secure_overwrite(key_buffer)
             
             return output_path
-        finally:
-            # Limpar dados sensíveis da memória
-            if 'key' in locals():
-                CryptoUtils.secure_overwrite(bytearray(key))
+            
+        except Exception as e:
+            if verbose:
+                logging.exception(f"Erro ao criptografar arquivo: {str(e)}")
+            raise
     
     @staticmethod
-    def decrypt_file(input_path: str, password: str, output_path: Optional[str] = None,
-                     verbose: bool = False) -> str:
+    def decrypt_file(
+        input_path: str, 
+        password: str, 
+        output_path: Optional[str] = None,
+        verbose: bool = False,
+        verify_with_key: Optional[bytes] = None,
+        associated_data: Optional[bytes] = None
+    ) -> str:
         """
-        Descriptografa um arquivo criptografado com AES-256-CBC.
+        Descriptografa um arquivo.
         
         Args:
-            input_path: Caminho do arquivo criptografado.
-            password: Senha para descriptografia.
-            output_path: Caminho de saída opcional para o arquivo descriptografado.
-            verbose: Se True, exibe informações detalhadas.
+            input_path: Caminho do arquivo criptografado
+            password: Senha para descriptografia
+            output_path: Caminho para salvar o arquivo descriptografado (opcional)
+            verbose: Se True, exibe mensagens detalhadas
+            verify_with_key: Chave pública para verificar assinatura (opcional)
+            associated_data: Dados associados para AEAD (opcional)
             
         Returns:
-            Caminho do arquivo descriptografado.
+            Caminho do arquivo descriptografado
         """
-        if not output_path:
-            output_path = FileHandler.get_output_path(input_path, False)
+        if verbose:
+            logging.info(f"Descriptografando arquivo {input_path}")
+        
+        # Definir caminho de saída se não fornecido
+        if output_path is None:
+            # Remover extensão .encrypted se presente
+            if input_path.endswith(".encrypted"):
+                output_path = input_path[:-10]
+            else:
+                output_path = input_path + ".decrypted"
         
         try:
-            with open(input_path, 'rb') as in_file:
-                # Ler salt e IV do início do arquivo
-                salt = in_file.read(CryptoUtils.SALT_SIZE)
-                iv = in_file.read(CryptoUtils.IV_SIZE)
+            with open(input_path, 'rb') as infile:
+                # Ler os primeiros bytes para analisar o cabeçalho
+                header_data = infile.read(8192)  # Ler o suficiente para o cabeçalho
                 
-                if len(salt) != CryptoUtils.SALT_SIZE or len(iv) != CryptoUtils.IV_SIZE:
-                    raise ValueError("Arquivo corrompido ou não criptografado corretamente")
+                # Extrair metadados
+                metadata, data_offset = FileFormat.unpack_header(header_data)
                 
-                # Derivar chave da senha
-                key = CryptoUtils.derive_key(password, salt)
+                # Mover o cursor do arquivo para o início dos dados criptografados
+                infile.seek(data_offset)
                 
-                with open(output_path, 'wb') as out_file:
-                    # Ler o primeiro chunk para validar a senha
-                    first_chunk = in_file.read(FileHandler.CHUNK_SIZE)
-                    if not first_chunk:
-                        return output_path  # Arquivo vazio
+                # Extrair parâmetros dos metadados
+                algorithm = metadata.get("algorithm", CryptoUtils.DEFAULT_ALGORITHM)
+                kdf_type = metadata.get("kdf", CryptoUtils.DEFAULT_KDF)
+                salt = base64.b64decode(metadata["salt"])
+                iv_or_nonce = base64.b64decode(metadata["iv_or_nonce"])
+                kdf_params = metadata.get("kdf_params", None)
+                
+                # Verificar dados associados se fornecidos
+                if associated_data and "ad_hash" in metadata:
+                    expected_hash = base64.b64decode(metadata["ad_hash"])
+                    actual_hash = CryptoUtils.hash_data(associated_data)
+                    if actual_hash != expected_hash:
+                        raise ValueError("Falha na verificação de dados associados")
+                
+                # Derivar chave
+                key = CryptoUtils.derive_key(password, salt, kdf_type, kdf_params)
+                
+                # Se precisar verificar assinatura, ler arquivo inteiro
+                signature = None
+                encrypted_data = None
+                
+                if verify_with_key:
+                    # Ler todo o conteúdo criptografado
+                    encrypted_data = infile.read()
                     
+                    # Verificar se há bloco de assinatura no final
                     try:
-                        decrypted_chunk = CryptoUtils.decrypt_data(first_chunk, key, iv)
-                        out_file.write(decrypted_chunk)
-                    except Exception as e:
-                        # Limpar arquivo parcial de saída
-                        out_file.close()
-                        os.unlink(output_path)
-                        raise ValueError("Senha incorreta ou arquivo corrompido") from e
-                    
-                    # Processar o resto do arquivo
-                    while True:
-                        chunk = in_file.read(FileHandler.CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        decrypted_chunk = CryptoUtils.decrypt_data(chunk, key, iv)
-                        out_file.write(decrypted_chunk)
-            
-            # Preservar metadados (opcional)
-            shutil.copystat(input_path, output_path)
-            
+                        sig_metadata, _ = FileFormat.unpack_header(encrypted_data[-8192:])
+                        signature = base64.b64decode(sig_metadata["signature"])
+                        
+                        # Remover a assinatura dos dados criptografados
+                        sig_offset = len(encrypted_data) - sig_metadata["signature_size"]
+                        encrypted_data = encrypted_data[:sig_offset]
+                    except Exception:
+                        # Se não houver assinatura, continuar sem verificação
+                        if verbose:
+                            logging.warning("Assinatura não encontrada, continuando sem verificação")
+                
+                # Abrir arquivo de saída
+                with open(output_path, 'wb') as outfile:
+                    if verify_with_key and signature and encrypted_data:
+                        # Verificar assinatura
+                        if not CryptoUtils.verify_signature(encrypted_data, signature, verify_with_key):
+                            raise ValueError("Assinatura digital inválida")
+                        
+                        # Descriptografar dados em chunks
+                        offset = 0
+                        while offset < len(encrypted_data):
+                            chunk_size = min(FileHandler.CHUNK_SIZE, len(encrypted_data) - offset)
+                            chunk = encrypted_data[offset:offset+chunk_size]
+                            
+                            # Descriptografar o chunk
+                            decrypted_chunk = CryptoUtils.decrypt_data(
+                                chunk, key, iv_or_nonce, algorithm, associated_data
+                            )
+                            outfile.write(decrypted_chunk)
+                            offset += chunk_size
+                    else:
+                        # Processar o arquivo em chunks (sem verificação de assinatura)
+                        while True:
+                            chunk = infile.read(FileHandler.CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            
+                            # Descriptografar o chunk
+                            decrypted_chunk = CryptoUtils.decrypt_data(
+                                chunk, key, iv_or_nonce, algorithm, associated_data
+                            )
+                            outfile.write(decrypted_chunk)
+                
             if verbose:
-                print(f"Arquivo descriptografado salvo em: {output_path}")
+                logging.info(f"Arquivo descriptografado salvo como {output_path}")
+            
+            # Limpar a chave da memória
+            key_buffer = bytearray(key)
+            CryptoUtils.secure_overwrite(key_buffer)
             
             return output_path
-        finally:
-            # Limpar dados sensíveis da memória
-            if 'key' in locals():
-                CryptoUtils.secure_overwrite(bytearray(key))
-        
+            
+        except Exception as e:
+            if verbose:
+                logging.exception(f"Erro ao descriptografar arquivo: {str(e)}")
+            raise
+    
     @staticmethod
     def process_path(input_path: str, password: str, encrypt: bool, 
                     output_dir: Optional[str] = None, verbose: bool = False) -> List[str]:
@@ -286,3 +426,10 @@ class FileHandler:
             tar.extractall(path=output_dir)
         
         return output_dir
+
+    @staticmethod
+    def hash_data(data: bytes) -> bytes:
+        """Calcula o hash SHA-256 dos dados."""
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(data)
+        return digest.finalize()

@@ -114,6 +114,38 @@ voidbound --encrypt --archive --input /dados/confidenciais --output /destino/seg
 Isso criará um único arquivo `/destino/seguro/confidenciais.encrypted` contendo toda a estrutura de diretórios criptografada.
 
 
+
+### Criptografia com AES-GCM:
+```bash
+voidbound --encrypt --input dados.txt --algorithm aes-gcm
+```
+
+### Criptografia com ChaCha20-Poly1305:
+```bash
+voidbound --encrypt --input dados.txt --algorithm chacha20
+```
+
+### Usando Argon2id com parâmetros personalizados:
+```bash
+voidbound --encrypt --input dados.txt --kdf argon2id --memory-cost 131072 --time-cost 4 --parallelism 2
+```
+
+### Gerando um par de chaves para assinaturas:
+```bash
+voidbound --generate-keys meu_par_de_chaves
+```
+
+### Criptografando e assinando um arquivo:
+```bash
+voidbound --encrypt --input dados.txt --sign meu_par_de_chaves.private
+```
+
+### Descriptografando e verificando um arquivo assinado:
+```bash
+voidbound --decrypt --input dados.txt.encrypted --verify meu_par_de_chaves.public
+```
+
+
 ### Interface Gráfica (GUI)
 
 Para iniciar a interface gráfica:

@@ -39,6 +39,26 @@ class CLI:
                            help='Exibir informações detalhadas de processamento')
         parser.add_argument('--archive', '-a', action='store_true',
                            help='Arquivar diretório como um único arquivo antes de criptografar')
+        
+        # Novos argumentos para algoritmos e KDFs
+        crypto_group = parser.add_argument_group('Opções de criptografia')
+        crypto_group.add_argument('--algorithm', choices=['aes-cbc', 'aes-gcm', 'chacha20'], 
+                                default='aes-cbc', help='Algoritmo de criptografia')
+        crypto_group.add_argument('--kdf', choices=['pbkdf2', 'argon2id', 'scrypt'], 
+                                default='pbkdf2', help='Função de derivação de chave')
+        
+        # Parâmetros de KDF
+        kdf_group = parser.add_argument_group('Parâmetros de KDF')
+        kdf_group.add_argument('--iterations', type=int, help='Número de iterações para PBKDF2')
+        kdf_group.add_argument('--memory-cost', type=int, help='Custo de memória para Argon2id (KB)')
+        kdf_group.add_argument('--time-cost', type=int, help='Custo de tempo para Argon2id')
+        kdf_group.add_argument('--parallelism', type=int, help='Paralelismo para Argon2id')
+        
+        # Opções de assinatura digital
+        sign_group = parser.add_argument_group('Assinatura Digital')
+        sign_group.add_argument('--sign', help='Arquivo com chave privada para assinar')
+        sign_group.add_argument('--verify', help='Arquivo com chave pública para verificar')
+        sign_group.add_argument('--generate-keys', help='Gerar par de chaves e salvar com prefixo')
  
         return parser
     
@@ -53,7 +73,24 @@ class CLI:
             Dicionário com os argumentos analisados.
         """
         parsed_args = self.parser.parse_args(args)
-        return vars(parsed_args)
+        result = vars(parsed_args)
+        
+        # Configurar os parâmetros do KDF
+        result['kdf_params'] = {}
+        if parsed_args.iterations:
+            result['kdf_params']['iterations'] = parsed_args.iterations
+        if parsed_args.memory_cost:
+            result['kdf_params']['memory_cost'] = parsed_args.memory_cost
+        if parsed_args.time_cost:
+            result['kdf_params']['time_cost'] = parsed_args.time_cost
+        if parsed_args.parallelism:
+            result['kdf_params']['parallelism'] = parsed_args.parallelism
+        
+        # Se não especificado, o modo padrão é criptografia
+        if not result['encrypt'] and not result['decrypt']:
+            result['encrypt'] = True
+        
+        return result
     
     def validate_args(self, args: Dict[str, Any]) -> None:
         """
